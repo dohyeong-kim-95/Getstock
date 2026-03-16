@@ -1,6 +1,6 @@
 # Tasks.md
 
-Phased implementation plan. MVP-first: get one market working end-to-end before adding the second. KRX is chosen as the first market because `pykrx` bulk API has no rate limit concerns and no API key setup.
+Phased implementation plan. MVP-first: get one market working end-to-end before adding the second. KRX is chosen as the first market because `pykrx` (the selected v1 Korea source) has no rate limit concerns, no API key setup, and provides adjusted prices. The official KRX Open API was evaluated and deferred to fallback/future role — see PRD.md and TRD.md for rationale.
 
 ---
 
@@ -252,6 +252,8 @@ Build the write/read layer and validation before ingestion, so the first real da
 
 ## Deferred / Not in v1
 
+- [ ] KRX Open API fallback fetcher: Implement `sources/krx_openapi.py` as a contingency if `pykrx` breaks. Would call `POST /svc/apis/sto/stk_bydd_trd` and `/sto/ksq_bydd_trd` with `AUTH_KEY` header. Provides raw OHLCV only (no adjusted prices). Requires API key registration at `openapi.krx.co.kr` and per-service subscription approval.
+- [ ] KRX Open API as validation source: Cross-check `pykrx` raw OHLCV against KRX Open API data to detect `pykrx` scraping errors or silent breakage.
 - [ ] Fallback data sources (Yahoo Finance, FRED, etc.)
 - [ ] Self-calculated adjusted prices for KRX (requires verified corporate action history)
 - [ ] Full ticker/name change history tracking (slowly changing dimension)
