@@ -6,7 +6,7 @@ Getstock is a daily end-of-day ETL module that ingests, normalizes, and stores e
 
 ## Problem Statement
 
-Backtesting trading strategies requires clean, consistent, daily OHLCV data with corporate action adjustments (dividends, splits), delisting awareness, and trading halt status. No single free data source covers both KRX and US markets in a unified schema. Manual data gathering is error-prone and non-reproducible.
+Backtesting trading strategies requires clean, consistent, daily OHLCV data with corporate action adjustments (dividends, splits) and delisting awareness. No single free data source covers both KRX and US markets in a unified schema. Manual data gathering is error-prone and non-reproducible.
 
 This module solves the data foundation problem: reliable, automated, daily ingestion from two markets into a single queryable format.
 
@@ -42,7 +42,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 ### In-Scope (v1)
 
 - **Markets**: KRX (Korean common stocks), US (stocks + ETFs).
-- **Data types**: Daily OHLCV (raw + adjusted in single dataset), dividends, splits, delisting status, trading halt status.
+- **Data types**: Daily OHLCV (raw + adjusted in single dataset), dividends (best-effort), splits (best-effort), delisting detection (inferred from universe snapshots), suspected trading halts (heuristic warnings only, not an authoritative dataset).
 - **Sources**: KRX public data via `pykrx` for Korea (primary; official KRX Open API evaluated and deferred to fallback role), Tiingo REST API for US.
 - **Backfill**: Full universe, most recent 1 year.
 - **Incremental updates**: Once per day, 30 minutes after each market close.
@@ -89,10 +89,10 @@ This module solves the data foundation problem: reliable, automated, daily inges
 - KRX: Use `pykrx`-supplied adjusted prices; do not self-calculate in v1.
 - Corporate action data quality may be incomplete in v1. Store what the source provides; log warnings for missing data.
 
-### FR-4: Delisting and Trading Halt
+### FR-4: Delisting Detection and Trading Halt Warnings
 
-- Detect delisted instruments via universe comparison with safety threshold (FR-1).
-- Detect trading halts heuristically: volume=0 on a trading day, or absence of data for an active instrument.
+- **Delisting**: Inferred by comparing consecutive universe snapshots — not sourced from a dedicated delisting event feed. If a previously active instrument disappears from the universe fetch (subject to the >20% safety threshold in FR-1), mark it as delisted. This is inference-based detection; the exact delisting date may lag by one trading day.
+- **Trading halts**: Best-effort heuristic only. If an active instrument has volume=0 or is absent from OHLCV data on a trading day, log a warning. v1 does not produce an authoritative halt dataset — halt signals are informational log warnings, not stored data.
 - Delisted instruments remain in historical data but are excluded from the active serving universe.
 - Historical OHLCV for delisted instruments is preserved and queryable when explicitly requested.
 
@@ -114,7 +114,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 - Produce adjusted OHLCV for backtesting.
 - US: Default to Tiingo's `adjClose` (dividend-adjusted). Store all `adj*` fields alongside raw prices.
 - KRX: Use provider-adjusted values as-is alongside raw prices.
-- **Staleness note**: Adjusted prices from past files are not retroactively updated during daily runs. Only the current date's file reflects the latest adjustment factors. Periodic re-backfill is needed to refresh historical adjusted prices. This is a known v1 limitation.
+- **Staleness warning**: Adjusted prices are point-in-time snapshots as of the date they were fetched. Daily runs only write the current date's file — historical files are never retroactively updated. After a new dividend or split, all historical `adj_*` values in previously written files become stale. v1 has no automatic historical refresh. The workaround is manual periodic re-backfill (e.g., `python -m getstock backfill --market us --start ... --end ...`). Users relying on adjusted series for backtesting should be aware of this limitation.
 
 ### FR-8: Storage
 
@@ -141,7 +141,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 
 - **NFR-1**: Daily incremental run must complete within 60 minutes for KRX. US run time depends on universe size and rate limits; 60 minutes for ~500 instruments, proportionally longer for larger universes.
 - **NFR-2**: All configuration and API keys stored in `.env`, not in code.
-- **NFR-3**: Logging to stdout/file with structured messages (timestamp, market, stage, status).
+- **NFR-3**: Logging to stdout/file with structured messages (timestamp, market, stage, status). Each run writes a lightweight JSON run manifest (`data/meta/runs/{date}_{market}.json`) with counts, status, timing, and errors for debugging.
 - **NFR-4**: All dependencies must be free/open-source. APIs must have a free tier.
 - **NFR-5**: Single-process execution; no distributed coordination needed.
 - **NFR-6**: Cron-compatible: each run is a single CLI invocation with exit code 0 on success.
@@ -162,7 +162,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 - Local or single-server execution.
 - Python ecosystem (aligns with DuckDB, Parquet, and data tooling).
 - **Tiingo free-tier rate limits**: The free tier limits API request throughput. For the full US equity universe (~8,000+ instruments), per-ticker fetching may require many hours. v1 defaults to a configurable universe filter. Users can start with a manageable subset (e.g., S&P 500, ~500 instruments) and expand as needed or upgrade to a paid tier.
-- **`pykrx` rate limits**: `pykrx` scrapes KRX and requires polite request pacing. The bulk per-date API (`get_market_ohlcv`) fetches all tickers in one call, making KRX ingestion fast.
+- **`pykrx` pacing**: `pykrx` scrapes KRX and has no formal API key or rate limit, but polite request pacing is still required to avoid being blocked. The bulk per-date API (`get_market_ohlcv`) fetches all tickers in one call, making daily runs fast (~1 request). For backfill (many dates) or per-ticker adjusted price calls, add delays (1s between bulk calls, 0.5s between per-ticker calls) to avoid overloading the upstream KRX site.
 
 ## Risks / Open Questions
 
@@ -187,7 +187,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 | US default backtest series = Tiingo dividend-adjusted close | Most common adjustment for equity backtesting. |
 | KRX adjusted prices = provider-supplied values | Self-calculation requires verified corporate action history; defer to v2. |
 | Overwrite ticker/name to current | Full ticker history tracking is complex; not needed for v1 backtesting. |
-| Delisted instruments excluded from active universe | Prevents lookahead bias in strategy selection. Historical data preserved for survivorship analysis. |
+| Delisted instruments excluded from active universe | Delisting is inferred from universe snapshot comparison, not a dedicated event feed. Detection may lag by one trading day. Prevents lookahead bias in strategy selection. Historical data preserved for survivorship analysis. |
 | Overwrite on provider data change | Simplest policy; no versioning overhead. |
 | 1-year backfill only | Limits initial data volume; sufficient for strategy development. |
 | Instrument-level quarantine on failure | Maximizes data availability per batch. |

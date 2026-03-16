@@ -67,7 +67,7 @@ Getstock is a Python-based daily ETL pipeline that ingests end-of-day equity dat
 | Dividends / splits | Limited but present (market cap for split proxy) | No endpoints |
 | Bulk per-date fetch | `get_market_ohlcv(date, market="ALL")` — one call | One call per date, but returns all tickers |
 | API key / approval | None required | Requires registration + per-service subscription approval (up to 1 business day per service) |
-| Rate limits | No formal limit; polite pacing sufficient | 10,000 requests/day per key |
+| Rate limits | No formal limit; polite pacing required (1s bulk, 0.5s per-ticker) | 10,000 requests/day per key |
 | Commercial use | No restriction | Explicitly prohibited |
 | Stability risk | Scrapes KRX HTML — may break on site changes | Official REST API — more stable long-term |
 
@@ -105,7 +105,8 @@ No alternative US source was formally evaluated. Tiingo provides raw + adjusted 
 10. **Write corporate action Parquet**: Dividends and splits to their respective paths.
 11. **Write universe snapshot**: Record today's universe fetch for auditing.
 12. **Write quarantine log**: Persist all quarantine entries (ingestion + validation failures).
-13. **Log summary**: Log counts, warnings, quarantined instruments, and timing.
+13. **Write run manifest**: Write JSON summary to `data/meta/runs/{YYYY-MM-DD}_{market}.json` with counts, status, timing, and errors.
+14. **Log summary**: Log counts, warnings, quarantined instruments, and timing to stdout/file.
 
 ## Source-Specific Ingestion Notes
 
@@ -117,9 +118,9 @@ No alternative US source was formally evaluated. Tiingo provides raw + adjusted 
 - **OHLCV (per-ticker, for backfill)**: Use `pykrx.stock.get_market_ohlcv_by_date(fromdate, todate, ticker)` when fetching a date range for a single ticker. For backfill, prefer iterating over dates with the bulk API instead.
 - **Adjusted prices**: Use `pykrx.stock.get_market_ohlcv_by_date(fromdate, todate, ticker, adjusted=True)` for adjusted prices. Note: the bulk per-date API does not support an `adjusted` parameter, so adjusted prices require per-ticker calls or a separate bulk function. **v1 approach**: For daily runs, fetch raw via bulk API. For adjusted prices, check if `pykrx` provides an adjusted bulk API; if not, use raw values and set `adj_*` columns equal to raw (since KRX does not have frequent dividends that would cause significant divergence within a single day's fetch). For backfill, use per-ticker adjusted calls. **Document clearly in code which path is used.**
 - **Dividends/Splits**: `pykrx` has limited corporate action APIs. Use `pykrx.stock.get_market_cap_by_date()` and related functions to detect share count changes (proxy for splits). For dividends, data may be sparse. Store what is available; log warnings for missing data. This is a best-effort dataset in v1.
-- **Delisting**: Compare today's universe (from `get_market_ticker_list`) against stored `instruments_krx.parquet`. Instruments absent from today's list that were previously active are delisting candidates, subject to the >20% safety threshold.
-- **Trading halts**: Heuristic: volume=0 on a trading day for an active instrument. Not stored as a separate dataset; inferred from OHLCV data.
-- **Rate limits**: The bulk per-date API is one request per call, so rate limits are not a concern for daily runs. For backfill (365 dates × 1 call each), add 1s delay between calls to be polite. For per-ticker calls (adjusted prices during backfill), add 0.5s delay.
+- **Delisting**: Inferred from universe snapshot comparison (not a dedicated delisting feed). Compare today's universe (from `get_market_ticker_list`) against stored `instruments_krx.parquet`. Instruments absent from today's list that were previously active are delisting candidates, subject to the >20% safety threshold. Detection may lag the actual delisting by one trading day.
+- **Trading halts**: Best-effort heuristic only: volume=0 on a trading day for an active instrument. Logged as a warning; not stored as a separate dataset. See "Trading Halts" section for limitations.
+- **Pacing**: `pykrx` has no formal API key or rate limit, but it scrapes KRX's web interface, so polite pacing is required to avoid being blocked. The bulk per-date API makes ~1 HTTP request per date, so daily runs need minimal pacing. For backfill (365 dates × 1 call each), add 1s delay between calls. For per-ticker calls (adjusted prices during backfill), add 0.5s delay between calls. These delays are mandatory, not optional.
 - **Market close**: KRX closes at 15:30 KST. Cron runs at 16:00 KST.
 - **Timezone**: All KRX dates are `Asia/Seoul` local dates. Stored as `DATE` type (no time component).
 - **Market calendar**: Use `exchange_calendars` with exchange code `XKRX`.
@@ -133,8 +134,8 @@ No alternative US source was formally evaluated. Tiingo provides raw + adjusted 
 - **Adjusted prices**: Tiingo's `adj*` fields are dividend-adjusted (and split-adjusted). Use `adjClose` as the default backtest series. Store all `adj*` fields alongside raw prices in the same OHLCV row.
 - **Dividends**: Not directly available as a separate endpoint on the free tier. In v1, derive dividend events by detecting changes between `close` and `adjClose` ratios across consecutive days, or omit and rely on adjusted prices for backtesting. Log what approach is used.
 - **Splits**: Same as dividends — derive from `adjVolume` vs `volume` ratio changes, or omit in v1. Not critical since adjusted prices already account for splits.
-- **Delisting**: Instruments whose `endDate` in the supported tickers CSV is in the past are delisted. Compare against stored metadata. Apply >20% safety threshold.
-- **Trading halts**: If Tiingo returns no data for a ticker on a date where the market was open, flag as potential halt in logs. Not stored as a separate dataset.
+- **Delisting**: Inferred from Tiingo's supported tickers CSV. Instruments whose `endDate` is in the past are marked as delisted. Also compare against stored metadata for universe-disappearance detection. Apply >20% safety threshold. Not sourced from a dedicated exchange delisting feed.
+- **Trading halts**: Best-effort heuristic only: if Tiingo returns no data for a ticker on a date where the market was open, log a warning. Not stored as a separate dataset. See "Trading Halts" section for limitations.
 - **Rate limits**: Free tier limits vary; monitor `X-RateLimit-Remaining` and `X-RateLimit-Limit` response headers. Implement adaptive rate limiting: start at 5 req/sec, back off if rate limit headers indicate throttling. On HTTP 429, wait for `Retry-After` header duration (or 60s default) and retry. For ~500 instruments, expect ~2–5 minutes. For full US universe (~8,000), expect multiple hours.
 - **Market close**: NYSE/NASDAQ close at 16:00 ET. Cron runs at 16:30 ET.
 - **Timezone**: All US dates stored as `DATE` type (no time component). Market calendar: `exchange_calendars` with `XNYS`.
@@ -175,8 +176,10 @@ data/
 ├── meta/
 │   ├── instruments_krx.parquet
 │   ├── instruments_us.parquet
-│   └── quarantine/
-│       └── {YYYY-MM-DD}_{market}.parquet
+│   ├── quarantine/
+│   │   └── {YYYY-MM-DD}_{market}.parquet
+│   └── runs/
+│       └── {YYYY-MM-DD}_{market}.json
 └── logs/
     └── {YYYY-MM-DD}_{market}.log
 ```
@@ -349,6 +352,7 @@ One file per market, overwritten on each run.
 | Instrument metadata (KRX) | `data/meta/instruments_krx.parquet` | Singleton | Overwritten daily |
 | Instrument metadata (US) | `data/meta/instruments_us.parquet` | Singleton | Overwritten daily |
 | Quarantine log | `data/meta/quarantine/{YYYY-MM-DD}_{market}.parquet` | Per run | Overwritten per date+market on re-run |
+| Run manifest | `data/meta/runs/{YYYY-MM-DD}_{market}.json` | Per run | Overwritten per date+market on re-run |
 
 ## Raw vs Adjusted Policy
 
@@ -360,25 +364,25 @@ One file per market, overwritten on each run.
 - Raw and adjusted columns coexist in the same OHLCV file. No separate directory trees.
 - If a source does not provide adjusted values for an instrument, `adj_*` columns are set to null. The raw columns are still written. The instrument is not excluded.
 - Adjusted series are never self-calculated in v1.
-- **Staleness**: Adjusted prices are point-in-time as of the date they were fetched. Tiingo retroactively updates `adj*` values after each dividend. Only re-fetching (via backfill) refreshes historical adjusted prices. This is a known v1 limitation. Recommend periodic re-backfill (e.g., monthly) for users who need consistent historical adjusted series.
+- **Staleness warning**: Adjusted prices are point-in-time snapshots as of the date they were fetched. Providers (especially Tiingo) retroactively update `adj*` values after each dividend or split, but v1 daily runs only write the current date's file — previously written historical files are never automatically refreshed. This means historical `adj_*` values drift from the provider's latest values over time. **v1 has no automatic historical refresh subsystem.** The workaround is manual periodic re-backfill (e.g., monthly: `python -m getstock backfill --market us --start ... --end ...`). Users relying on adjusted series for backtesting should re-backfill before any analysis that depends on consistent historical adjusted prices.
 
 ## Delisting / Halt Handling Policy
 
-### Delisting
+### Delisting (Inference-Based)
 
-- **Detection**: Compare current universe fetch against stored instrument metadata. Instruments absent from the current universe that were previously active are candidates for delisting.
+- **Detection method**: Inferred from universe snapshot comparison — not sourced from a dedicated delisting event feed. Compare current universe fetch against stored instrument metadata. Instruments absent from the current universe that were previously active are candidates for delisting. The detected `delisted_date` is the date the instrument first disappeared from the universe, which may lag the actual delisting by one trading day.
 - **Safety threshold**: If >20% of previously active instruments are absent, assume a data source anomaly. Log error, skip delisting detection, proceed with previous universe. This prevents mass false-positive delistings from source outages or fetch failures.
 - **Marking**: Set `is_active = false` and `delisted_date = today` in instrument metadata.
 - **Data retention**: All historical OHLCV data for delisted instruments remains in Parquet files. Delisted instruments are still queryable by filtering on `source_id`.
 - **Serving**: Default queries should filter on `is_active = true` (via instrument metadata join or where clause). Backtesting engine may explicitly include delisted instruments for survivorship-bias-free analysis.
 - **Re-listing**: If an instrument reappears after being marked delisted, set `is_active = true` and clear `delisted_date`. Log a warning. This handles temporary listing suspensions.
 
-### Trading Halts
+### Trading Halts (Best-Effort Warnings Only)
 
 - **Detection**: Heuristic-based. If a market was open (per `exchange_calendars`) but an active instrument has volume=0 or is absent from the OHLCV data for that date, it may be halted.
-- **Storage**: Not a separate dataset in v1. The signal is implicit in the OHLCV data (missing row or volume=0).
-- **Logging**: Log instruments with suspected halts at WARNING level for auditing.
-- **Future**: Add an explicit `is_halted` boolean column to OHLCV if sources provide reliable halt data.
+- **Storage**: Not a separate dataset in v1. No halt column is written. The signal is implicit in the OHLCV data (missing row or volume=0).
+- **Logging**: Log instruments with suspected halts at WARNING level. These are informational warnings for the maintainer, not authoritative halt status.
+- **Limitation**: Neither `pykrx` nor Tiingo free tier provides reliable halt status. v1 cannot distinguish a genuine halt from a data-source gap or a zero-volume day on a thinly traded instrument.
 
 ## Validation Rules
 
@@ -525,7 +529,25 @@ logging:
   ```
   RUN SUMMARY | market=us | date=2026-03-15 | universe=500 | fetched=495 | quarantined=3 | skipped=2 | duration=4m32s
   ```
-- **No external monitoring in v1.** Rely on cron output and log files. Future: add notification on non-zero exit.
+- **Run manifest**: After each run, write a lightweight JSON summary to `data/meta/runs/{YYYY-MM-DD}_{market}.json`. This is the primary debugging artifact for daily ETL runs. Contents:
+  ```json
+  {
+    "market": "krx",
+    "date": "2026-03-15",
+    "status": "success",
+    "started_at": "2026-03-15T07:00:12Z",
+    "finished_at": "2026-03-15T07:02:45Z",
+    "duration_seconds": 153,
+    "universe_size": 2487,
+    "fetched_count": 2485,
+    "quarantined_count": 2,
+    "skipped_count": 0,
+    "files_written": ["ohlcv", "universe", "instruments", "quarantine"],
+    "errors": []
+  }
+  ```
+  Overwritten on re-run (same idempotency as other artifacts). Machine-readable for scripting; human-readable for quick inspection. No external dependencies.
+- **No external monitoring in v1.** Rely on cron output, log files, and run manifests. Future: add notification on non-zero exit.
 
 ## Testing Strategy
 
