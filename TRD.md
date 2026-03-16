@@ -51,6 +51,44 @@ Getstock is a Python-based daily ETL pipeline that ingests end-of-day equity dat
 7. **DuckDB is read-only.** DuckDB is used only as a query engine over Parquet. It does not own the data.
 8. **Configuration over code.** Market schedules, API keys, file paths—all in config/env, not hardcoded.
 
+## Source Selection Rationale
+
+### Korea: `pykrx` (primary) vs KRX Open API (fallback)
+
+**Decision**: Use `pykrx` as the v1 Korea data source. Keep the official KRX Open API as a documented fallback only.
+
+**What was evaluated**: The official KRX Open API at `openapi.krx.co.kr` (base URL: `data-dbg.krx.co.kr/svc/apis/`) provides 31 REST endpoints across 7 categories (stocks, indices, ETP, bonds, derivatives, general commodities, ESG). It serves raw OHLCV for KOSPI, KOSDAQ, and KONEX markets, with data from 2010 onwards, updated at 08:00 KST (T+1).
+
+**Why `pykrx` was chosen over KRX Open API for v1**:
+
+| Criterion | `pykrx` | KRX Open API |
+|---|---|---|
+| Adjusted prices | Yes, via per-ticker `adjusted=True` | Not available — raw OHLCV only |
+| Dividends / splits | Limited but present (market cap for split proxy) | No endpoints |
+| Bulk per-date fetch | `get_market_ohlcv(date, market="ALL")` — one call | One call per date, but returns all tickers |
+| API key / approval | None required | Requires registration + per-service subscription approval (up to 1 business day per service) |
+| Rate limits | No formal limit; polite pacing sufficient | 10,000 requests/day per key |
+| Commercial use | No restriction | Explicitly prohibited |
+| Stability risk | Scrapes KRX HTML — may break on site changes | Official REST API — more stable long-term |
+
+**Key tradeoff**: `pykrx` is less official (scraping-based) but more practical for a backtesting-oriented v1 that needs adjusted prices, corporate action proxies, and zero-setup ingestion. The KRX Open API is more stable and official but lacks the adjusted-price and corporate-action features that v1 requires.
+
+**Fallback plan**: If `pykrx` breaks (KRX website changes), the KRX Open API can provide raw OHLCV as an interim source while `pykrx` is fixed or replaced. This would mean temporarily losing adjusted prices for KRX (set `adj_*` columns to null). The fallback would require: (1) obtaining an API key from `openapi.krx.co.kr`, (2) subscribing to the `stk_bydd_trd` and `ksq_bydd_trd` services, (3) implementing a new fetcher that calls `POST /svc/apis/sto/stk_bydd_trd` with `AUTH_KEY` header and `basDd` parameter.
+
+**KRX Open API reference** (for future use):
+- Portal: `https://openapi.krx.co.kr/`
+- API base: `https://data-dbg.krx.co.kr/svc/apis/`
+- Auth: `AUTH_KEY` header
+- Stock endpoints: `/sto/stk_bydd_trd` (KOSPI OHLCV), `/sto/ksq_bydd_trd` (KOSDAQ OHLCV), `/sto/stk_isu_base_info` (KOSPI listing), `/sto/ksq_isu_base_info` (KOSDAQ listing)
+- Response: JSON with data in `OutBlock_1` array
+- Fields: `ISU_SRT_CD` (stock code), `TDD_OPNPRC` (open), `TDD_HGPRC` (high), `TDD_LWPRC` (low), `TDD_CLSPRC` (close), `ACC_TRDVOL` (volume)
+
+### US: Tiingo
+
+**Decision**: Tiingo REST API as the sole US data source for v1.
+
+No alternative US source was formally evaluated. Tiingo provides raw + adjusted OHLCV, a stable universe file, and a free tier sufficient for a filtered universe. This is adequate for v1.
+
 ## Data Flow: Source to Serving
 
 ### Step-by-step per daily run
@@ -73,7 +111,7 @@ Getstock is a Python-based daily ETL pipeline that ingests end-of-day equity dat
 
 ### KRX
 
-- **Library**: `pykrx` — a maintained Python library that scrapes KRX data. Preferred over custom scraping.
+- **Library**: `pykrx` — a maintained Python library that scrapes KRX data. Selected as the v1 primary source over the official KRX Open API (see "Source Selection Rationale" above).
 - **Universe**: Use `pykrx.stock.get_market_ticker_list(date, market="ALL")` to get all listed tickers. Call for both KOSPI and KOSDAQ. Filter to common stocks by checking `get_market_ticker_name()` and stock type. `pykrx` stock codes are 6-digit strings (e.g., `"005930"` for Samsung Electronics). These serve as `source_id`.
 - **OHLCV (bulk per-date)**: Use `pykrx.stock.get_market_ohlcv(date, market="ALL")` to fetch all tickers for a single date in one call. This returns open, high, low, close, volume for all listed instruments. This is the primary ingestion method — one HTTP request per date, not per ticker.
 - **OHLCV (per-ticker, for backfill)**: Use `pykrx.stock.get_market_ohlcv_by_date(fromdate, todate, ticker)` when fetching a date range for a single ticker. For backfill, prefer iterating over dates with the bulk API instead.
@@ -530,6 +568,7 @@ logging:
 | Date-partitioned vs ticker-partitioned Parquet | Date-partitioned | Ticker-partitioned | Daily overwrites affect one file. Cross-sectional queries align with rebalancing. Ticker-partitioned requires rewriting per-ticker files on every run. |
 | Overwrite vs append | Overwrite per date | Append with dedup | Simpler write path. No duplicate row risk. Idempotent by construction. |
 | Provider-adjusted vs self-calculated (KRX) | Provider-adjusted | Self-calculate from splits/dividends | Self-calculation requires verified corporate action history. Provider values are good enough for v1. |
+| `pykrx` vs KRX Open API (Korea source) | `pykrx` as primary, KRX Open API as fallback | KRX Open API as primary | `pykrx` provides adjusted prices, no API key needed, zero-setup. KRX Open API lacks adjusted prices, dividends, splits; requires registration and approval; prohibits commercial use. See "Source Selection Rationale". |
 | `pykrx` bulk per-date vs per-ticker | Bulk per-date for daily runs | Per-ticker for each instrument | One HTTP request per date vs thousands. Dramatically faster for daily runs. Per-ticker used only for backfill adjusted prices if needed. |
 | Configurable US universe filter | Filter supported, default `all` | Always fetch full universe | Free-tier rate limits make full-universe daily runs take hours. Filter lets users start small. |
 | DuckDB direct-on-Parquet vs persistent DB | Direct on Parquet | Persistent DuckDB file | One year of data is small. Avoids sync between Parquet source-of-truth and DB. |

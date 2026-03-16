@@ -43,7 +43,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 
 - **Markets**: KRX (Korean common stocks), US (stocks + ETFs).
 - **Data types**: Daily OHLCV (raw + adjusted in single dataset), dividends, splits, delisting status, trading halt status.
-- **Sources**: KRX public data via `pykrx` for Korea, Tiingo REST API for US.
+- **Sources**: KRX public data via `pykrx` for Korea (primary; official KRX Open API evaluated and deferred to fallback role), Tiingo REST API for US.
 - **Backfill**: Full universe, most recent 1 year.
 - **Incremental updates**: Once per day, 30 minutes after each market close.
 - **Storage**: Parquet files, DuckDB as read-only query layer.
@@ -169,7 +169,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 | # | Risk / Question | Mitigation / Default |
 |---|---|---|
 | R1 | Tiingo free tier cannot fetch full US universe (~8,000 tickers) within 60 minutes. | Default to a filtered universe (configurable watchlist or index membership). Document how to expand. Periodic bulk backfill can run overnight. |
-| R2 | `pykrx` API stability: it scrapes KRX, which may change HTML/endpoints without notice. | Pin `pykrx` version. Monitor for breakage. Upstream library is actively maintained. |
+| R2 | `pykrx` API stability: it scrapes KRX, which may change HTML/endpoints without notice. | Pin `pykrx` version. Monitor for breakage. Upstream library is actively maintained. Fallback contingency: the official KRX Open API (`openapi.krx.co.kr`, 31 endpoints, data from 2010+) can provide raw OHLCV if `pykrx` breaks, though it lacks adjusted prices and corporate actions. |
 | R3 | `pykrx` adjusted prices may not be available for all KRX instruments or all dates. | Log warning, store raw-only for those instruments. Adjusted columns set to null. |
 | R4 | Delisting detection: universe fetch anomaly (source outage) could false-positive delist everything. | Safety threshold: skip delisting if >20% of universe disappears in one run. |
 | R5 | Adjusted price staleness: daily runs only update the current date's file. Historical adjusted prices become stale after each new dividend. | Document limitation. Recommend periodic re-backfill (e.g., monthly). |
@@ -181,6 +181,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 
 | Decision | Rationale |
 |---|---|
+| **Korea source: `pykrx` (primary), KRX Open API (fallback only)** | The official KRX Open API (`openapi.krx.co.kr`) was evaluated and rejected as the v1 primary source. It lacks adjusted prices, dividends, and splits endpoints; requires per-service approval (up to 1 business day); has a 10,000 requests/day limit; and prohibits commercial use. `pykrx` provides bulk per-date OHLCV, adjusted prices via per-ticker calls, and requires no API key or approval. KRX Open API is retained as a future fallback if `pykrx` breaks. |
 | Single OHLCV file with raw + adjusted columns | Avoids duplicating data across two directory trees. Most queries need both raw and adjusted. Simplifies DuckDB queries. |
 | `source_id` as stable primary key | Tickers change and get recycled. KRX stock codes and Tiingo `permaTicker` are stable identifiers. `ticker` is kept for readability but is not the join key. |
 | US default backtest series = Tiingo dividend-adjusted close | Most common adjustment for equity backtesting. |
@@ -198,6 +199,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 
 - Extend backfill to full available history.
 - Add fallback data sources (e.g., Yahoo Finance, FRED for macro).
+- Evaluate KRX Open API as a fallback or validation source for Korea data (raw OHLCV cross-check against `pykrx`).
 - Ticker/name change history tracking.
 - Self-calculated adjusted prices for KRX.
 - Fundamental data (earnings, financials).
