@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "getstock"
+version = "0.1.0"
+description = "Daily ETL module for equity market data (KRX + US)"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "duckdb>=0.9",
+    "pykrx>=1.0",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "exchange-calendars>=4.5",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "responses>=0.24",
+]
+
+[project.scripts]
+getstock = "getstock.cli:cli"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
