@@ -59,14 +59,23 @@ class RunSummary:
         }
 
 
-def run_daily(market: str, target_date: date, config: AppConfig) -> RunSummary:
-    """Run the full daily pipeline for a market."""
+def run_daily(
+    market: str, target_date: date, config: AppConfig,
+    fetch_adjusted: bool = False,
+) -> RunSummary:
+    """Run the full daily pipeline for a market.
+
+    Args:
+        fetch_adjusted: If True (backfill mode), fetch per-ticker adjusted
+            prices for KRX. If False (daily mode), set adj_* = raw values.
+            Has no effect on US market (Tiingo always provides adjusted).
+    """
     summary = RunSummary(market=market, date=target_date)
     start = time.time()
 
     try:
         if market == "krx":
-            _run_krx(target_date, config, summary)
+            _run_krx(target_date, config, summary, fetch_adjusted=fetch_adjusted)
         elif market == "us":
             _run_us(target_date, config, summary)
         else:
@@ -94,10 +103,14 @@ def run_daily(market: str, target_date: date, config: AppConfig) -> RunSummary:
     return summary
 
 
-def _run_krx(target_date: date, config: AppConfig, summary: RunSummary) -> None:
+def _run_krx(
+    target_date: date, config: AppConfig, summary: RunSummary,
+    fetch_adjusted: bool = False,
+) -> None:
     from getstock.sources.krx import (
         fetch_adjusted_krx,
         fetch_ohlcv_krx,
+        fill_adjusted_from_raw,
         merge_raw_adjusted,
     )
     from getstock.universe import detect_delistings, fetch_universe_krx
@@ -126,9 +139,18 @@ def _run_krx(target_date: date, config: AppConfig, summary: RunSummary) -> None:
     raw_df = fetch_ohlcv_krx(target_date)
     summary.fetched_count = len(raw_df)
 
-    active_tickers = instruments[instruments["is_active"] == True]["source_id"].tolist()
-    adj_df, ingestion_errors = fetch_adjusted_krx(target_date, active_tickers)
-    merged = merge_raw_adjusted(raw_df, adj_df)
+    ingestion_errors: list[dict] = []
+    if fetch_adjusted:
+        # Backfill mode: per-ticker adjusted price fetch (slow, ~0.5s per ticker)
+        active_tickers = instruments[instruments["is_active"] == True]["source_id"].tolist()
+        adj_df, ingestion_errors = fetch_adjusted_krx(target_date, active_tickers)
+        merged = merge_raw_adjusted(raw_df, adj_df)
+    else:
+        # Daily mode: set adj_* = raw values (no per-ticker HTTP calls).
+        # KRX bulk API does not support adjusted prices. For daily runs,
+        # raw and adjusted diverge only on ex-dividend/split dates, which
+        # are infrequent. Periodic re-backfill refreshes adjusted values.
+        merged = fill_adjusted_from_raw(raw_df)
 
     # 3. Normalize
     normalized = normalize_ohlcv(merged, "pykrx")
@@ -227,7 +249,7 @@ def run_backfill(
             continue
 
         try:
-            run_daily(market, d, config)
+            run_daily(market, d, config, fetch_adjusted=True)
         except Exception as e:
             logger.error(f"Failed for {d}: {e}", exc_info=True)
             continue

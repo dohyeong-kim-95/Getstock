@@ -13,19 +13,20 @@ logger = logging.getLogger(__name__)
 
 
 def fetch_universe_krx(target_date: date) -> pd.DataFrame:
-    """Fetch KRX universe via pykrx."""
-    from pykrx import stock
+    """Fetch KRX universe via pykrx bulk API (single HTTP call per market)."""
+    from pykrx.website.krx.market.wrap import get_market_ticker_and_name
 
     date_str = target_date.strftime("%Y%m%d")
     tickers = []
 
     for market_name in ["KOSPI", "KOSDAQ"]:
-        market_tickers = stock.get_market_ticker_list(date_str, market=market_name)
-        for t in market_tickers:
-            name = stock.get_market_ticker_name(t)
+        # Bulk call: returns Series with ticker as index, name as value.
+        # One HTTP request per market, not per ticker.
+        names_series = get_market_ticker_and_name(date_str, market_name)
+        for ticker_code, name in names_series.items():
             tickers.append({
-                "source_id": t,
-                "ticker": t,
+                "source_id": ticker_code,
+                "ticker": ticker_code,
                 "name": name,
                 "market": "krx",
                 "asset_type": "stock",

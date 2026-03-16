@@ -1,12 +1,13 @@
 """Tests for universe management and delisting detection."""
 
 from datetime import date
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
 from getstock.schema import INSTRUMENTS_COLUMNS
-from getstock.universe import detect_delistings
+from getstock.universe import detect_delistings, fetch_universe_krx
 
 
 def _make_instruments(ids, active=True, today=date(2026, 3, 15)):
@@ -70,3 +71,36 @@ def test_new_instrument_added():
     assert len(result) == 3
     c_row = result[result["source_id"] == "C"].iloc[0]
     assert c_row["first_seen"] == date(2026, 3, 16)
+
+
+@patch("pykrx.website.krx.market.wrap.get_market_ticker_and_name")
+def test_fetch_universe_krx_uses_bulk_api(mock_bulk):
+    """Verify universe fetch uses bulk API, not per-ticker name calls."""
+    # Mock returns Series: ticker->name, one call per market
+    mock_bulk.side_effect = [
+        pd.Series({"005930": "Samsung", "000660": "SK Hynix"}),  # KOSPI
+        pd.Series({"035420": "Naver"}),  # KOSDAQ
+    ]
+
+    result = fetch_universe_krx(date(2026, 3, 13))
+
+    # Exactly 2 bulk calls (KOSPI + KOSDAQ), not N per-ticker calls
+    assert mock_bulk.call_count == 2
+    assert len(result) == 3
+    assert set(result["source_id"]) == {"005930", "000660", "035420"}
+    assert result[result["source_id"] == "005930"].iloc[0]["name"] == "Samsung"
+    assert result[result["source_id"] == "035420"].iloc[0]["exchange"] == "KOSDAQ"
+
+
+@patch("pykrx.website.krx.market.wrap.get_market_ticker_and_name")
+def test_fetch_universe_krx_no_per_ticker_calls(mock_bulk):
+    """Ensure fetch_universe_krx never imports or calls get_market_ticker_name."""
+    mock_bulk.side_effect = [
+        pd.Series({"005930": "Samsung"}),
+        pd.Series(),
+    ]
+
+    # Patch the per-ticker function to fail if called
+    with patch("pykrx.stock.get_market_ticker_name", side_effect=AssertionError("per-ticker call detected")):
+        result = fetch_universe_krx(date(2026, 3, 13))
+        assert len(result) == 1

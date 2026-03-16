@@ -106,6 +106,17 @@ def fetch_adjusted_krx(
     return adj_df, errors
 
 
+def fill_adjusted_from_raw(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Set adj_* columns equal to raw values (daily mode, no per-ticker fetch)."""
+    df = raw_df.copy()
+    df["adj_open"] = df["open"]
+    df["adj_high"] = df["high"]
+    df["adj_low"] = df["low"]
+    df["adj_close"] = df["close"]
+    df["adj_volume"] = df["volume"]
+    return df
+
+
 def merge_raw_adjusted(raw_df: pd.DataFrame, adj_df: pd.DataFrame) -> pd.DataFrame:
     """Left-join raw OHLCV with adjusted prices on (source_id, date)."""
     if adj_df.empty:
