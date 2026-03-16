@@ -1,0 +1,32 @@
+data_dir: ./data
+
+markets:
+  krx:
+    timezone: Asia/Seoul
+    exchange_calendar: XKRX
+    close_time: "15:30"
+    run_delay_minutes: 30
+    asset_types: [stock]
+    source: pykrx
+  us:
+    timezone: US/Eastern
+    exchange_calendar: XNYS
+    close_time: "16:00"
+    run_delay_minutes: 30
+    asset_types: [stock, etf]
+    source: tiingo
+    universe_filter: all  # Options: "all", "watchlist", or path to CSV file
+    # watchlist: [AAPL, MSFT, GOOGL]  # Used when universe_filter: watchlist
+
+backfill:
+  lookback_days: 365
+
+validation:
+  price_change_warn_threshold: 0.50
+
+delisting:
+  safety_threshold: 0.20  # Skip delisting if >20% of universe disappears
+
+logging:
+  level: INFO
+  file_enabled: true
