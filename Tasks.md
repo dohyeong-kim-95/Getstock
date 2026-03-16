@@ -1,6 +1,6 @@
 # Tasks.md
 
-Phased implementation plan. MVP-first: get one market working end-to-end before adding the second. KRX is chosen as the first market because `pykrx` (the selected v1 Korea source) requires no API key, provides adjusted prices, and has minimal rate-limit overhead (bulk per-date fetch; polite pacing sufficient). The official KRX Open API was evaluated and deferred to fallback/future role — see PRD.md and TRD.md for rationale.
+Phased implementation plan. MVP-first: get one market working end-to-end before adding the second. KRX is chosen as the first market because `pykrx` (the selected v1 Korea source) does not require API key management, provides adjusted prices, but still requires polite pacing/throttling for safe bulk collection. The official KRX Open API was evaluated and deferred to fallback/future role — see PRD.md and TRD.md for rationale.
 
 ---
 
