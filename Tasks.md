@@ -100,14 +100,14 @@ Build the write/read layer and validation before ingestion, so the first real da
   - V5: volume >= 0 → quarantine
   - V6: date matches target_date → warning only
   - V7: unique (source_id, date) → keep last, warn
-  - V8: price spike > 50% from previous close → warning only
+  - V8: price spike > 50% from previous close → warning only *(deferred: requires cross-date state not available in single-date validation)*
 - [x]Validate adjusted prices if present (adj_close > 0, adj_high >= adj_low) → quarantine
 - [x]Return `(clean_df, quarantine_df)`. Quarantine df has columns: `source_id, ticker, date, stage, error_type, error_detail`.
 
 ### Quarantine (`quarantine.py`)
 
 - [x]Implement `merge_quarantine(ingestion_errors_df, validation_errors_df) → combined_df`: Combine quarantine entries from different stages.
-- [x]Implement `write_quarantine_log(combined_df, market, date, data_dir)`: Write via storage module.
+- [x]Implement `write_quarantine(combined_df, market, date, data_dir)`: Write via storage module.
 
 ### Tests for Phase 2
 
@@ -138,7 +138,7 @@ Build the write/read layer and validation before ingestion, so the first real da
 - [x]Implement `fetch_ohlcv_krx(date) → DataFrame`: Use `pykrx.stock.get_market_ohlcv(date, market="ALL")`. Returns all tickers for one date. Map columns to canonical schema. Set `source_id` = index (KRX ticker code), `market` = "krx", `source` = "pykrx", `fetched_at` = utcnow(). Set `adj_*` columns to null initially (raw-only from bulk API).
 - [x]Implement `fetch_adjusted_krx(date, tickers) → DataFrame`: For each ticker, call `pykrx.stock.get_market_ohlcv_by_date(date, date, ticker, adjusted=True)`. Add 0.5s delay between calls. Return DataFrame with `source_id`, `date`, `adj_open`, `adj_high`, `adj_low`, `adj_close`, `adj_volume`. Wrap per-ticker calls in try/except; collect failures.
 - [x]Implement `merge_raw_adjusted(raw_df, adjusted_df) → DataFrame`: Left-join on `(source_id, date)`. Raw rows without adjusted data get null `adj_*` columns.
-- [x]Implement KRX dividend/split fetch (best-effort): Use available `pykrx` APIs. If data is sparse or unavailable, return empty DataFrame and log warning. Do not block pipeline on this.
+- [x]Implement KRX dividend/split fetch stubs (best-effort): Return empty DataFrame and log warning. Actual dividend/split data ingestion deferred to v2. Not wired into pipeline.
 
 ### Normalization (`normalize.py`)
 
@@ -153,7 +153,7 @@ Build the write/read layer and validation before ingestion, so the first real da
   2. Fetch raw OHLCV (bulk) → fetch adjusted OHLCV → merge → normalize
   3. Validate → split into valid + quarantine
   4. Write OHLCV Parquet
-  5. Fetch dividends/splits (best-effort) → normalize → write Parquet
+  5. ~~Fetch dividends/splits (best-effort) → normalize → write Parquet~~ *(deferred to v2; stub functions exist but are not wired into pipeline)*
   6. Write universe snapshot
   7. Write quarantine log (merged ingestion + validation errors)
   8. Write run manifest JSON to `data/meta/runs/{YYYY-MM-DD}_{market}.json` (counts, status, timing, errors)
@@ -183,7 +183,7 @@ Build the write/read layer and validation before ingestion, so the first real da
 - [x]Implement `fetch_universe_tiingo(api_key, universe_filter, config) → DataFrame`: Download supported tickers ZIP, parse CSV. Filter to `assetType` in `["Stock", "ETF"]`, `priceCurrency == "USD"`, active (`endDate` null or future). Apply universe filter from config (`all`, `watchlist`, or CSV path). Map to instrument metadata schema with `source_id` = Tiingo ticker.
 - [x]Implement `fetch_ohlcv_tiingo(ticker, start_date, end_date, api_key) → DataFrame`: Call `GET /tiingo/daily/<ticker>/prices`. Parse JSON response. Returns raw + adjusted fields. Single-ticker call.
 - [x]Implement `fetch_ohlcv_batch_tiingo(tickers, date, api_key) → (DataFrame, list[QuarantineEntry])`: Loop over tickers, call `fetch_ohlcv_tiingo` per ticker. Implement adaptive rate limiting: track `X-RateLimit-Remaining` headers, sleep when approaching limit. On 429, wait for `Retry-After` (default 60s). On per-ticker failure (timeout, 4xx, 5xx), add to quarantine list and continue. Return merged DataFrame + list of failures.
-- [x]Implement Tiingo dividend/split derivation (best-effort): Compare `close` vs `adjClose` ratios across consecutive days to detect dividend events. Or skip in v1 and log that dividends/splits are not independently tracked for US. Adjusted prices already account for them.
+- [x]Implement Tiingo dividend/split stubs (best-effort): Return empty DataFrame and log that dividends/splits are derived from adjusted prices in v1. Not wired into pipeline. Actual derivation deferred to v2.
 
 ### US Universe & Delisting
 
@@ -271,3 +271,5 @@ Build the write/read layer and validation before ingestion, so the first real da
 - [ ] Independent dividend/split datasets for US (currently derived from adjusted prices or omitted)
 - [ ] Automated periodic re-backfill to refresh historical adjusted prices
 - [ ] Pre-built DuckDB views for common backtest queries
+- [ ] V8 validation: price spike detection (requires cross-date state; currently stubbed as comment in validate.py)
+- [ ] Dividend/split pipeline integration (stub functions exist in sources/krx.py and sources/tiingo.py; need to wire into pipeline.py and storage)

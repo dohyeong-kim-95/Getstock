@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pandas as pd
 import pytest
@@ -50,36 +50,59 @@ def _mock_ohlcv(target_date):
     ], columns=OHLCV_COLUMNS)
 
 
-@patch("getstock.sources.krx.fetch_adjusted_krx")
 @patch("getstock.sources.krx.fetch_ohlcv_krx")
 @patch("getstock.universe.fetch_universe_krx")
-def test_run_daily_krx(mock_universe, mock_ohlcv, mock_adj, mock_config):
-    target = date(2026, 3, 13)  # a Friday
+def test_run_daily_krx(mock_universe, mock_ohlcv, mock_config):
+    """Daily run should NOT call fetch_adjusted_krx (uses adj=raw instead)."""
+    target = date(2026, 3, 13)
     mock_universe.return_value = _mock_universe(target)
     mock_ohlcv.return_value = _mock_ohlcv(target)
-    mock_adj.return_value = (pd.DataFrame(columns=["source_id", "date", "adj_open", "adj_high", "adj_low", "adj_close", "adj_volume"]), [])
 
     from getstock.pipeline import run_daily
 
-    summary = run_daily("krx", target, mock_config)
+    with patch("getstock.sources.krx.fetch_adjusted_krx") as mock_adj:
+        summary = run_daily("krx", target, mock_config)
+        # Daily mode: fetch_adjusted_krx must NOT be called
+        mock_adj.assert_not_called()
+
     assert summary.status == "success"
     assert summary.fetched_count == 2
 
-    # Verify Parquet file written
+    # Verify Parquet written with adj_* = raw values
     path = ohlcv_path(mock_config.data_dir, "krx", target)
     assert path.exists()
     df = read_parquet(path)
     assert len(df) == 2
+    row = df[df["source_id"] == "005930"].iloc[0]
+    assert row["adj_close"] == row["close"]
+    assert row["adj_open"] == row["open"]
 
 
 @patch("getstock.sources.krx.fetch_adjusted_krx")
 @patch("getstock.sources.krx.fetch_ohlcv_krx")
 @patch("getstock.universe.fetch_universe_krx")
-def test_run_daily_idempotent(mock_universe, mock_ohlcv, mock_adj, mock_config):
+def test_run_daily_krx_backfill_mode(mock_universe, mock_ohlcv, mock_adj, mock_config):
+    """Backfill mode (fetch_adjusted=True) DOES call fetch_adjusted_krx."""
     target = date(2026, 3, 13)
     mock_universe.return_value = _mock_universe(target)
     mock_ohlcv.return_value = _mock_ohlcv(target)
-    mock_adj.return_value = (pd.DataFrame(columns=["source_id", "date", "adj_open", "adj_high", "adj_low", "adj_close", "adj_volume"]), [])
+    mock_adj.return_value = (pd.DataFrame(columns=[
+        "source_id", "date", "adj_open", "adj_high", "adj_low", "adj_close", "adj_volume"
+    ]), [])
+
+    from getstock.pipeline import run_daily
+
+    summary = run_daily("krx", target, mock_config, fetch_adjusted=True)
+    mock_adj.assert_called_once()
+    assert summary.status == "success"
+
+
+@patch("getstock.sources.krx.fetch_ohlcv_krx")
+@patch("getstock.universe.fetch_universe_krx")
+def test_run_daily_idempotent(mock_universe, mock_ohlcv, mock_config):
+    target = date(2026, 3, 13)
+    mock_universe.return_value = _mock_universe(target)
+    mock_ohlcv.return_value = _mock_ohlcv(target)
 
     from getstock.pipeline import run_daily
 

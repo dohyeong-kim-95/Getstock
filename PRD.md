@@ -67,7 +67,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 ### FR-1: Universe Management
 
 - Maintain a list of active instruments per market (KRX, US).
-- Each instrument has a stable `source_id` (KRX 6-digit stock code; Tiingo `permaTicker`) that does not change across ticker renames.
+- Each instrument has a `source_id` (KRX 6-digit stock code; Tiingo ticker symbol) used as the primary key. **Note**: Tiingo's free-tier supported tickers CSV does not provide `permaTicker`. The ticker symbol is the best available identifier on the free tier. Tiingo internally maps old tickers to new ones, so tickers are reasonably stable but not guaranteed immutable. `permaTicker` is available via Tiingo's Fundamentals API (separate endpoint, may require paid tier) and could be adopted in a future version.
 - The `ticker` and `name` fields are overwritten to current values on each run. `source_id` is the stable join key across all datasets.
 - Include common stocks for KRX; stocks and ETFs for US.
 - Mark instruments as delisted when detected; exclude from default active universe.
@@ -183,7 +183,7 @@ This module solves the data foundation problem: reliable, automated, daily inges
 |---|---|
 | **Korea source: `pykrx` (primary), KRX Open API (fallback only)** | The official KRX Open API (`openapi.krx.co.kr`) was evaluated and rejected as the v1 primary source. It lacks adjusted prices, dividends, and splits endpoints; requires per-service approval (up to 1 business day); has a 10,000 requests/day limit; and prohibits commercial use. `pykrx` provides bulk per-date OHLCV, adjusted prices via per-ticker calls, and requires no API key or approval. KRX Open API is retained as a future fallback if `pykrx` breaks. |
 | Single OHLCV file with raw + adjusted columns | Avoids duplicating data across two directory trees. Most queries need both raw and adjusted. Simplifies DuckDB queries. |
-| `source_id` as stable primary key | Tickers change and get recycled. KRX stock codes and Tiingo `permaTicker` are stable identifiers. `ticker` is kept for readability but is not the join key. |
+| `source_id` as primary key | KRX stock codes are stable. Tiingo tickers are the best available free-tier identifier (Tiingo maps old→new internally). `permaTicker` from Tiingo Fundamentals API is a future upgrade path. |
 | US default backtest series = Tiingo dividend-adjusted close | Most common adjustment for equity backtesting. |
 | KRX adjusted prices = provider-supplied values | Self-calculation requires verified corporate action history; defer to v2. |
 | Overwrite ticker/name to current | Full ticker history tracking is complex; not needed for v1 backtesting. |
