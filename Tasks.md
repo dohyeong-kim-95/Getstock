@@ -1,6 +1,6 @@
 # Tasks.md
 
-Phased implementation plan. MVP-first: get one market working end-to-end before adding the second. KRX is chosen as the first market because `pykrx` (the selected v1 Korea source) has no rate limit concerns, no API key setup, and provides adjusted prices. The official KRX Open API was evaluated and deferred to fallback/future role — see PRD.md and TRD.md for rationale.
+Phased implementation plan. MVP-first: get one market working end-to-end before adding the second. KRX is chosen as the first market because `pykrx` (the selected v1 Korea source) requires no API key, provides adjusted prices, and has minimal rate-limit overhead (bulk per-date fetch; polite pacing sufficient). The official KRX Open API was evaluated and deferred to fallback/future role — see PRD.md and TRD.md for rationale.
 
 ---
 
@@ -84,10 +84,11 @@ Build the write/read layer and validation before ingestion, so the first real da
 
 - [ ] Implement `write_parquet(df, path)`: Atomic write (write to `{path}.tmp`, then `os.replace` to `{path}`). Create parent directories. Enforce schema dtypes from `schema.py`.
 - [ ] Implement `read_parquet(path) → DataFrame`: Read single Parquet file.
-- [ ] Implement path builders: `ohlcv_path(data_dir, market, date)`, `dividends_path(...)`, `splits_path(...)`, `universe_path(...)`, `instruments_path(...)`, `quarantine_path(...)`. All return absolute paths matching the TRD directory layout.
+- [ ] Implement path builders: `ohlcv_path(data_dir, market, date)`, `dividends_path(...)`, `splits_path(...)`, `universe_path(...)`, `instruments_path(...)`, `quarantine_path(...)`, `run_manifest_path(...)`. All return absolute paths matching the TRD directory layout.
 - [ ] Implement `write_ohlcv(df, market, date, data_dir)`: Sort by `source_id`, enforce schema, write atomically.
 - [ ] Implement `write_instruments(df, market, data_dir)`: Overwrite metadata file.
 - [ ] Implement `write_quarantine(df, market, date, data_dir)`: Write quarantine log for date+market.
+- [ ] Implement `write_run_manifest(summary, market, date, data_dir)`: Write JSON run manifest to `data/meta/runs/{YYYY-MM-DD}_{market}.json`. Contains: market, date, status, started_at, finished_at, duration_seconds, universe_size, fetched_count, quarantined_count, files_written, errors. Overwritten on re-run.
 
 ### Validation (`validate.py`)
 
@@ -155,8 +156,9 @@ Build the write/read layer and validation before ingestion, so the first real da
   5. Fetch dividends/splits (best-effort) → normalize → write Parquet
   6. Write universe snapshot
   7. Write quarantine log (merged ingestion + validation errors)
-  8. Log run summary (universe size, fetched count, quarantined count, duration)
-  9. Return summary dataclass with counts and status
+  8. Write run manifest JSON to `data/meta/runs/{YYYY-MM-DD}_{market}.json` (counts, status, timing, errors)
+  9. Log run summary (universe size, fetched count, quarantined count, duration)
+  10. Return summary dataclass with counts and status
 - [ ] Implement `run_backfill(market, start_date, end_date, config)`: Iterate over trading dates using `exchange_calendars`. Call `run_daily` per date. Log progress.
 - [ ] Wire `cli.py` `run` and `backfill` commands to `pipeline.py`.
 
