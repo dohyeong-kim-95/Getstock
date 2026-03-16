@@ -233,10 +233,10 @@ Build the write/read layer and validation before ingestion, so the first real da
 
 ### Operations
 
-- [ ] Add crontab example entries to README (KRX: 07:00 UTC weekdays, US: 21:30 UTC weekdays).
-- [ ] Document manual backfill procedure (how to run, what to expect, timing estimates).
-- [ ] Document quarantine inspection: how to query quarantine logs via DuckDB.
-- [ ] Document data querying: sample DuckDB SQL for common patterns (single ticker history, cross-sectional snapshot, join with metadata).
+- [x]Add crontab example entries to README (KRX: 07:00 UTC weekdays, US: 21:30 UTC weekdays).
+- [x]Document manual backfill procedure (how to run, what to expect, timing estimates).
+- [x]Document quarantine inspection: how to query quarantine logs via DuckDB.
+- [x]Document data querying: sample DuckDB SQL for common patterns (single ticker history, cross-sectional snapshot, join with metadata).
 
 ### Milestone check: Full 1-year backfill runs for KRX. US backfill runs for configured subset. Cron schedule works for 7 consecutive days.
 
@@ -244,7 +244,7 @@ Build the write/read layer and validation before ingestion, so the first real da
 
 ## Phase 7: Documentation & Polish
 
-- [ ] Write `README.md`: Overview, setup instructions (venv, pip install, .env), usage examples, cron configuration, data directory layout, DuckDB query examples, architecture summary.
+- [x]Write `README.md`: Overview, setup instructions (venv, pip install, .env), usage examples, cron configuration, data directory layout, DuckDB query examples, architecture summary.
 - [x]Add `.env.example` with all environment variables documented.
 - [x]Review all log messages for clarity and consistency.
 - [x]Review error messages for actionability (tell the user what to do, not just what went wrong).
