@@ -1,6 +1,10 @@
 # Tasks.md
 
-## Phase 1: Repository Setup & Configuration
+Phased implementation plan. MVP-first: get one market working end-to-end before adding the second. KRX is chosen as the first market because `pykrx` bulk API has no rate limit concerns and no API key setup.
+
+---
+
+## Phase 1: Project Skeleton & Config
 
 ### Repository Setup
 
@@ -8,224 +12,247 @@
   ```
   getstock/
   ├── __init__.py
-  ├── __main__.py          # CLI entry point
-  ├── cli.py               # CLI argument parsing
-  ├── config.py            # Config loading
-  ├── models.py            # Schema definitions (dataclasses/TypedDict)
+  ├── __main__.py          # CLI entry point (`python -m getstock`)
+  ├── cli.py               # Click CLI definitions
+  ├── config.py            # Config + env loading
+  ├── schema.py            # Canonical schema constants (column names, types)
   ├── sources/
   │   ├── __init__.py
-  │   ├── krx.py           # KRX fetcher
-  │   └── tiingo.py        # Tiingo fetcher
+  │   ├── krx.py           # KRX fetcher via pykrx
+  │   └── tiingo.py        # Tiingo fetcher via requests
   ├── normalize.py         # Source → canonical schema mapping
-  ├── validate.py          # Validation rules
-  ├── adjust.py            # Adjusted series generation
-  ├── storage.py           # Parquet read/write
-  ├── quarantine.py        # Quarantine handling
+  ├── validate.py          # Validation rules (V1–V8)
   ├── universe.py          # Universe management & delisting detection
+  ├── quarantine.py        # Quarantine handling
+  ├── storage.py           # Parquet read/write with atomic writes
+  ├── pipeline.py          # Orchestration: ties ingestion → normalize → validate → store
+  ├── query.py             # DuckDB query helpers
   └── logging_config.py    # Logging setup
   tests/
   ├── __init__.py
-  ├── fixtures/
+  ├── conftest.py          # Shared fixtures (tmp data dirs, sample DataFrames)
+  ├── fixtures/            # Recorded API responses
   ├── test_config.py
+  ├── test_schema.py
   ├── test_normalize.py
   ├── test_validate.py
   ├── test_storage.py
+  ├── test_universe.py
+  ├── test_quarantine.py
+  ├── test_pipeline.py
   ├── test_sources/
   │   ├── test_krx.py
   │   └── test_tiingo.py
-  └── test_integration.py
+  └── test_query.py
   config.yaml
   .env.example
   .gitignore
   pyproject.toml
-  README.md
   ```
-- [ ] Create `pyproject.toml` with dependencies: `pandas`, `pyarrow`, `duckdb`, `pykrx`, `requests`, `python-dotenv`, `pyyaml`, `exchange-calendars`, `click`
-- [ ] Create `.gitignore` (include `data/`, `.env`, `__pycache__/`, `*.egg-info/`, `.venv/`)
-- [ ] Create `.env.example` with placeholder for `TIINGO_API_KEY`
-- [ ] Set up `pytest` in `pyproject.toml`
+- [ ] Create `pyproject.toml` with dependencies: `pandas`, `pyarrow`, `duckdb`, `pykrx`, `requests`, `python-dotenv`, `pyyaml`, `exchange-calendars`, `click`. Dev dependencies: `pytest`, `responses` (HTTP mocking).
+- [ ] Create `.gitignore`: `data/`, `.env`, `__pycache__/`, `*.egg-info/`, `.venv/`, `dist/`
+- [ ] Create `.env.example`: `TIINGO_API_KEY=your_api_key_here`
 
-### Config
+### Config & Logging
 
-- [ ] Implement `config.py`: Load `config.yaml` and `.env`. Validate required keys exist at startup. Fail fast with clear error if `TIINGO_API_KEY` is missing.
-- [ ] Create `config.yaml` with market definitions (timezone, close time, run delay, asset types, source) and data directory paths.
-- [ ] Implement `logging_config.py`: Configure Python `logging` with format `%(asctime)s | %(levelname)s | %(name)s | %(message)s`. Output to stdout + optional file.
+- [ ] Implement `config.py`: Load `config.yaml` and `.env` via `python-dotenv`. Validate at startup: `TIINGO_API_KEY` required only when `--market us`. Expose config as a dataclass or typed dict.
+- [ ] Create `config.yaml` per TRD spec (markets, exchange calendars, universe filter, backfill lookback, validation thresholds, delisting safety threshold, logging settings).
+- [ ] Implement `logging_config.py`: Configure Python `logging` with format `%(asctime)s | %(levelname)s | %(name)s | %(message)s`. Stdout always; file to `data/logs/{date}_{market}.log` if enabled.
 
----
+### Schema Constants
 
-## Phase 2: Core Ingestion
+- [ ] Implement `schema.py`: Define canonical column names and dtypes as constants for OHLCV, dividends, splits, instrument metadata, quarantine. Used by normalize, validate, and storage modules for consistency.
 
-### Universe Management
+### CLI Scaffold
 
-- [ ] Implement `universe.py`: `fetch_universe(market) → DataFrame` that returns the current list of active instruments with columns matching the Instrument Metadata schema.
-- [ ] KRX universe: Use `pykrx` to fetch KOSPI + KOSDAQ tickers. Filter to common stocks. Map to canonical instrument metadata schema.
-- [ ] US universe: Download Tiingo supported tickers CSV. Filter to `assetType` in `[Stock, ETF]`. Map to canonical schema.
-- [ ] Implement delisting detection: Compare fetched universe against stored `instruments_{market}.parquet`. Mark missing instruments as delisted with today's date.
-- [ ] Implement metadata overwrite: Update ticker, name, `last_updated` on each run.
+- [ ] Implement `cli.py` with `click` commands (stubs that log and exit):
+  - `python -m getstock run --market {krx|us} [--date YYYY-MM-DD]`
+  - `python -m getstock backfill --market {krx|us} --start YYYY-MM-DD --end YYYY-MM-DD`
+  - `python -m getstock query --market {krx|us} [--ticker TICKER] [--start DATE] [--end DATE]`
+- [ ] Implement `__main__.py` to invoke CLI.
+- [ ] `run` command: Use `exchange_calendars` to determine if `--date` (or today) is a trading day. Exit 0 with log message if not.
 
-### KRX Ingestion (`sources/krx.py`)
-
-- [ ] Implement `fetch_ohlcv_krx(tickers, start_date, end_date) → DataFrame`. Use `pykrx.stock.get_market_ohlcv_by_date()` or per-ticker API. Add 0.5s delay between requests.
-- [ ] Implement `fetch_adjusted_krx(tickers, start_date, end_date) → DataFrame`. Use `pykrx` adjusted price functions.
-- [ ] Implement `fetch_dividends_krx(tickers, start_date, end_date) → DataFrame`. Use available `pykrx` corporate action APIs.
-- [ ] Implement `fetch_splits_krx(tickers, start_date, end_date) → DataFrame`. Use available `pykrx` APIs. Log warning if data is sparse.
-- [ ] Handle per-instrument errors: wrap each ticker fetch in try/except, collect failures for quarantine.
-
-### Tiingo Ingestion (`sources/tiingo.py`)
-
-- [ ] Implement `fetch_ohlcv_tiingo(tickers, start_date, end_date, api_key) → DataFrame`. Use Tiingo daily prices endpoint. Returns raw + adjusted fields.
-- [ ] Implement rate limiting: Track request count, sleep when approaching 500/hour. Respect `Retry-After` headers on 429 responses.
-- [ ] Implement retry logic: 3 retries with exponential backoff (2s, 4s, 8s) on connection errors.
-- [ ] Implement `fetch_dividends_tiingo(tickers, start_date, end_date, api_key) → DataFrame`. Use Tiingo fundamentals/metadata endpoint if available on free tier.
-- [ ] Implement `fetch_splits_tiingo(tickers, start_date, end_date, api_key) → DataFrame`. Same as dividends; if not directly available, log warning.
-- [ ] Handle per-instrument errors: wrap each ticker fetch in try/except, collect failures for quarantine.
+### Milestone check: `python -m getstock run --market krx` exits cleanly with "not a trading day" or "stub: would run pipeline".
 
 ---
 
-## Phase 3: Normalization & Adjusted Series
+## Phase 2: Storage & Validation Foundation
 
-### Normalization (`normalize.py`)
-
-- [ ] Implement `normalize_ohlcv(df, source) → DataFrame`: Map source-specific columns to canonical OHLCV schema. Add `source` and `fetched_at` columns.
-- [ ] Implement `normalize_dividends(df, source) → DataFrame`: Map to canonical dividends schema.
-- [ ] Implement `normalize_splits(df, source) → DataFrame`: Map to canonical splits schema.
-- [ ] Ensure all date columns are `date` type (not datetime). Strip time components.
-- [ ] Ensure ticker column uses consistent format per market.
-
-### Adjusted Series (`adjust.py`)
-
-- [ ] Implement `generate_adjusted_ohlcv(raw_df, source) → DataFrame`:
-  - US: Copy Tiingo `adj*` fields into canonical `adj_open`, `adj_high`, `adj_low`, `adj_close`, `adj_volume`.
-  - KRX: Copy `pykrx` adjusted values into canonical adjusted columns.
-- [ ] If adjusted values are missing for an instrument, exclude from adjusted output and log warning.
-
----
-
-## Phase 4: Validation & Quarantine
-
-### Validation (`validate.py`)
-
-- [ ] Implement validation function `validate_ohlcv(df) → (valid_df, quarantine_df)`:
-  - V1: Positive prices (`open > 0`, `high > 0`, `low > 0`, `close > 0`)
-  - V2: `high >= low`
-  - V3: `high >= open` and `high >= close`
-  - V4: `low <= open` and `low <= close`
-  - V5: `volume >= 0`
-  - V6: Date in expected range (warning only)
-  - V7: No duplicate `(ticker, date)` — keep last, warn
-  - V8: Price change > 50% from previous close — warning only, keep data
-- [ ] Return tuple of `(clean DataFrame, quarantine DataFrame with error details)`.
-- [ ] Each quarantined row includes: `ticker`, `date`, `stage=validation`, `error_type`, `error_detail`.
-
-### Quarantine (`quarantine.py`)
-
-- [ ] Implement `write_quarantine(quarantine_df, market, run_date, data_dir)`: Write to `data/meta/quarantine/{YYYY-MM-DD}_{market}.parquet`.
-- [ ] Implement `read_quarantine(market, run_date, data_dir) → DataFrame`: Read quarantine for a specific run.
-- [ ] Merge quarantine entries from ingestion errors and validation errors before writing.
-
----
-
-## Phase 5: Storage
+Build the write/read layer and validation before ingestion, so the first real data fetch can immediately go through the full path.
 
 ### Parquet Storage (`storage.py`)
 
-- [ ] Implement `write_parquet(df, path)`: Write DataFrame to Parquet with `pyarrow`. Create parent directories if needed.
-- [ ] Implement `read_parquet(path) → DataFrame`: Read a single Parquet file.
-- [ ] Implement `write_daily_ohlcv(df, market, data_type, run_date, data_dir)`: Write to correct path (`data/{raw|adjusted}/{market}/ohlcv/{YYYY}/{YYYY-MM-DD}.parquet`).
-- [ ] Implement `write_daily_dividends(df, market, run_date, data_dir)`.
-- [ ] Implement `write_daily_splits(df, market, run_date, data_dir)`.
-- [ ] Implement `write_universe_snapshot(df, market, run_date, data_dir)`.
-- [ ] Implement `write_instrument_metadata(df, market, data_dir)`: Overwrite `data/meta/instruments_{market}.parquet`.
-- [ ] Ensure all writes are atomic: write to temp file, then rename (prevents corrupt files on crash).
+- [ ] Implement `write_parquet(df, path)`: Atomic write (write to `{path}.tmp`, then `os.replace` to `{path}`). Create parent directories. Enforce schema dtypes from `schema.py`.
+- [ ] Implement `read_parquet(path) → DataFrame`: Read single Parquet file.
+- [ ] Implement path builders: `ohlcv_path(data_dir, market, date)`, `dividends_path(...)`, `splits_path(...)`, `universe_path(...)`, `instruments_path(...)`, `quarantine_path(...)`. All return absolute paths matching the TRD directory layout.
+- [ ] Implement `write_ohlcv(df, market, date, data_dir)`: Sort by `source_id`, enforce schema, write atomically.
+- [ ] Implement `write_instruments(df, market, data_dir)`: Overwrite metadata file.
+- [ ] Implement `write_quarantine(df, market, date, data_dir)`: Write quarantine log for date+market.
+
+### Validation (`validate.py`)
+
+- [ ] Implement `validate_ohlcv(df, target_date) → (valid_df, quarantine_df)`:
+  - V1: Positive prices (open, high, low, close > 0) → quarantine
+  - V2: high >= low → quarantine
+  - V3: high >= open and high >= close → quarantine
+  - V4: low <= open and low <= close → quarantine
+  - V5: volume >= 0 → quarantine
+  - V6: date matches target_date → warning only
+  - V7: unique (source_id, date) → keep last, warn
+  - V8: price spike > 50% from previous close → warning only
+- [ ] Validate adjusted prices if present (adj_close > 0, adj_high >= adj_low) → quarantine
+- [ ] Return `(clean_df, quarantine_df)`. Quarantine df has columns: `source_id, ticker, date, stage, error_type, error_detail`.
+
+### Quarantine (`quarantine.py`)
+
+- [ ] Implement `merge_quarantine(ingestion_errors_df, validation_errors_df) → combined_df`: Combine quarantine entries from different stages.
+- [ ] Implement `write_quarantine_log(combined_df, market, date, data_dir)`: Write via storage module.
+
+### Tests for Phase 2
+
+- [ ] `test_storage.py`: Test atomic write (verify no partial files on simulated crash). Test path builders. Test round-trip write/read with schema enforcement.
+- [ ] `test_validate.py`: Test each validation rule (V1–V8) with crafted DataFrames. Test quarantine output schema. Test that valid rows are not affected by invalid rows.
+- [ ] `test_quarantine.py`: Test merge logic. Test write/read round-trip.
+- [ ] `conftest.py`: Create shared fixtures: sample OHLCV DataFrame, tmp `data_dir` via `tmp_path`.
+
+### Milestone check: Can write a hand-crafted OHLCV DataFrame → validate → store to Parquet → read back via DuckDB.
 
 ---
 
-## Phase 6: DuckDB Integration
+## Phase 3: KRX Ingestion (First Market, End-to-End)
 
-### DuckDB Query Layer
+### Universe Management (`universe.py`)
 
-- [ ] Create `getstock/query.py` with helper functions:
-  - `get_adjusted_close(market, ticker, start_date, end_date) → DataFrame`
-  - `get_universe(market, active_only=True) → DataFrame`
-  - `get_quarantine_log(market, start_date, end_date) → DataFrame`
-- [ ] Use `duckdb.query()` with `read_parquet()` and glob patterns.
-- [ ] Add a simple CLI subcommand: `python -m getstock query --market us --ticker AAPL --start 2025-06-01 --end 2026-03-15` that prints results to stdout.
+- [ ] Implement `fetch_universe_krx(date) → DataFrame`: Use `pykrx.stock.get_market_ticker_list(date, market="KOSPI")` + `market="KOSDAQ"`. For each ticker, get name via `get_market_ticker_name()`. Map to instrument metadata schema with `source_id` = KRX 6-digit code, `asset_type` = "stock", `exchange` = KOSPI/KOSDAQ.
+- [ ] Implement `detect_delistings(new_universe_df, stored_instruments_df, safety_threshold=0.20) → updated_instruments_df`:
+  - Compare `source_id` sets.
+  - If missing count > safety_threshold × active count: log error, return stored instruments unchanged.
+  - Otherwise: mark missing instruments as `is_active=false, delisted_date=today`.
+  - Handle re-listing: if previously delisted instrument reappears, set `is_active=true`, clear `delisted_date`, log warning.
+  - Merge new instruments (`first_seen=today`).
+  - Update `ticker`, `name`, `last_updated` for all instruments from new universe.
 
----
+### KRX Fetcher (`sources/krx.py`)
 
-## Phase 7: CLI & Pipeline Orchestration
+- [ ] Implement `fetch_ohlcv_krx(date) → DataFrame`: Use `pykrx.stock.get_market_ohlcv(date, market="ALL")`. Returns all tickers for one date. Map columns to canonical schema. Set `source_id` = index (KRX ticker code), `market` = "krx", `source` = "pykrx", `fetched_at` = utcnow(). Set `adj_*` columns to null initially (raw-only from bulk API).
+- [ ] Implement `fetch_adjusted_krx(date, tickers) → DataFrame`: For each ticker, call `pykrx.stock.get_market_ohlcv_by_date(date, date, ticker, adjusted=True)`. Add 0.5s delay between calls. Return DataFrame with `source_id`, `date`, `adj_open`, `adj_high`, `adj_low`, `adj_close`, `adj_volume`. Wrap per-ticker calls in try/except; collect failures.
+- [ ] Implement `merge_raw_adjusted(raw_df, adjusted_df) → DataFrame`: Left-join on `(source_id, date)`. Raw rows without adjusted data get null `adj_*` columns.
+- [ ] Implement KRX dividend/split fetch (best-effort): Use available `pykrx` APIs. If data is sparse or unavailable, return empty DataFrame and log warning. Do not block pipeline on this.
 
-### CLI (`cli.py` + `__main__.py`)
+### Normalization (`normalize.py`)
 
-- [ ] Implement CLI using `click`:
-  - `python -m getstock run --market {krx|us}` — daily incremental run
-  - `python -m getstock backfill --market {krx|us} --start YYYY-MM-DD --end YYYY-MM-DD` — historical backfill
-  - `python -m getstock query --market {krx|us} [--ticker TICKER] [--start DATE] [--end DATE]` — ad-hoc query
-- [ ] `run` command: Determine today's trading date using `exchange_calendars`. If not a trading day, exit 0 with log message.
-- [ ] `run` command orchestration:
-  1. Load config
-  2. Fetch universe → detect delistings → write metadata
-  3. Fetch OHLCV (raw) → normalize → validate → quarantine failures → write raw Parquet
-  4. Generate adjusted series → write adjusted Parquet
-  5. Fetch dividends → normalize → write Parquet
-  6. Fetch splits → normalize → write Parquet
-  7. Write universe snapshot
-  8. Write quarantine log
-  9. Log run summary
-- [ ] `backfill` command: Iterate over trading dates in range. Call same pipeline per date. Add progress logging.
-- [ ] Exit code 0 on success, 1 on failure. Instrument-level quarantine is not a failure.
+- [ ] Implement `normalize_ohlcv(df, source) → DataFrame`: Map source-specific column names to canonical names. Ensure `date` is `DATE` type (strip time). Ensure `source_id` is `VARCHAR`. Ensure price columns are `DOUBLE`. Ensure volume columns are `BIGINT`.
+- [ ] Implement `normalize_dividends(df, source) → DataFrame`: Map to canonical dividends schema.
+- [ ] Implement `normalize_splits(df, source) → DataFrame`: Map to canonical splits schema.
 
----
+### Pipeline Orchestration (`pipeline.py`)
 
-## Phase 8: Tests
+- [ ] Implement `run_daily(market, date, config) → RunSummary`:
+  1. Fetch universe → detect delistings → write instrument metadata
+  2. Fetch raw OHLCV (bulk) → fetch adjusted OHLCV → merge → normalize
+  3. Validate → split into valid + quarantine
+  4. Write OHLCV Parquet
+  5. Fetch dividends/splits (best-effort) → normalize → write Parquet
+  6. Write universe snapshot
+  7. Write quarantine log (merged ingestion + validation errors)
+  8. Log run summary (universe size, fetched count, quarantined count, duration)
+  9. Return summary dataclass with counts and status
+- [ ] Implement `run_backfill(market, start_date, end_date, config)`: Iterate over trading dates using `exchange_calendars`. Call `run_daily` per date. Log progress.
+- [ ] Wire `cli.py` `run` and `backfill` commands to `pipeline.py`.
 
-### Unit Tests
+### Tests for Phase 3
 
-- [ ] `test_config.py`: Test config loading, missing keys, default values.
-- [ ] `test_normalize.py`: Test KRX and Tiingo raw data → canonical schema mapping with sample data.
-- [ ] `test_validate.py`: Test each validation rule (V1–V8) with crafted DataFrames. Verify quarantine output.
-- [ ] `test_storage.py`: Test Parquet write/read round-trip. Verify file paths and directory creation.
-- [ ] `test_sources/test_krx.py`: Test KRX fetcher with mocked `pykrx` calls.
-- [ ] `test_sources/test_tiingo.py`: Test Tiingo fetcher with mocked HTTP responses (use `responses` or `pytest-mock`).
+- [ ] `tests/fixtures/krx_ohlcv_sample.py`: Sample DataFrames mimicking `pykrx` output for 5 tickers, 3 dates. Include one ticker with bad data (negative price) for quarantine testing.
+- [ ] `test_sources/test_krx.py`: Mock `pykrx` calls. Test `fetch_ohlcv_krx`, `fetch_adjusted_krx`. Test per-ticker error handling.
+- [ ] `test_normalize.py`: Test KRX raw data → canonical schema mapping.
+- [ ] `test_universe.py`: Test delisting detection with safety threshold. Test re-listing. Test first-run (no stored metadata).
+- [ ] `test_pipeline.py`: Integration test with mocked `pykrx`. Run pipeline for 1 date, 5 tickers. Verify: Parquet files at correct paths, schema matches, quarantine file exists for bad ticker, DuckDB query returns expected rows.
+- [ ] Test idempotency: Run pipeline twice on same date, verify output files identical.
+- [ ] Test holiday: Mock a non-trading day, verify early exit.
 
-### Integration Tests
-
-- [ ] `test_integration.py`: Run full pipeline with mocked API responses for 1 date, 5 tickers. Verify:
-  - Raw and adjusted Parquet files exist at correct paths
-  - Schema matches canonical definitions
-  - DuckDB queries return expected results
-  - Quarantine file contains expected failures (inject one bad ticker in fixtures)
-- [ ] Test idempotency: Run pipeline twice, verify output files are identical.
-- [ ] Test holiday handling: Mock a non-trading day, verify early exit.
-
-### Test Fixtures
-
-- [ ] Create `tests/fixtures/krx_ohlcv_sample.json` with sample KRX response data.
-- [ ] Create `tests/fixtures/tiingo_ohlcv_sample.json` with sample Tiingo response data.
-- [ ] Create `tests/fixtures/tiingo_universe_sample.csv` with sample supported tickers data.
+### Milestone check: `python -m getstock run --market krx` fetches real KRX data for today (or `--date`), writes Parquet, queryable via DuckDB.
 
 ---
 
-## Phase 9: Documentation & Operations
+## Phase 4: Tiingo / US Ingestion (Second Market)
 
-### Docs
+### Tiingo Fetcher (`sources/tiingo.py`)
 
-- [ ] Write `README.md`: Setup instructions, usage examples, cron configuration, architecture overview.
-- [ ] Add inline docstrings to all public functions.
+- [ ] Implement `fetch_universe_tiingo(api_key, universe_filter, config) → DataFrame`: Download supported tickers ZIP, parse CSV. Filter to `assetType` in `["Stock", "ETF"]`, `priceCurrency == "USD"`, active (`endDate` null or future). Apply universe filter from config (`all`, `watchlist`, or CSV path). Map to instrument metadata schema with `source_id` = Tiingo ticker.
+- [ ] Implement `fetch_ohlcv_tiingo(ticker, start_date, end_date, api_key) → DataFrame`: Call `GET /tiingo/daily/<ticker>/prices`. Parse JSON response. Returns raw + adjusted fields. Single-ticker call.
+- [ ] Implement `fetch_ohlcv_batch_tiingo(tickers, date, api_key) → (DataFrame, list[QuarantineEntry])`: Loop over tickers, call `fetch_ohlcv_tiingo` per ticker. Implement adaptive rate limiting: track `X-RateLimit-Remaining` headers, sleep when approaching limit. On 429, wait for `Retry-After` (default 60s). On per-ticker failure (timeout, 4xx, 5xx), add to quarantine list and continue. Return merged DataFrame + list of failures.
+- [ ] Implement Tiingo dividend/split derivation (best-effort): Compare `close` vs `adjClose` ratios across consecutive days to detect dividend events. Or skip in v1 and log that dividends/splits are not independently tracked for US. Adjusted prices already account for them.
+
+### US Universe & Delisting
+
+- [ ] Wire `fetch_universe_tiingo` into `universe.py`. Reuse `detect_delistings()` (same logic, different source). Tiingo uses `endDate` field for explicit delisting; also compare against stored metadata.
+
+### US Normalization
+
+- [ ] Add Tiingo normalization to `normalize.py`: Map Tiingo JSON fields (`adjOpen`, `adjHigh`, `adjLow`, `adjClose`, `adjVolume`) to canonical `adj_*` columns. Map `date` (ISO string) to `DATE`.
+
+### US Pipeline Integration
+
+- [ ] Wire Tiingo fetcher into `pipeline.py` `run_daily` for `market=us`. Same orchestration flow: universe → OHLCV → normalize → validate → store.
+- [ ] Add `--date` override for US backfill.
+
+### Tests for Phase 4
+
+- [ ] `tests/fixtures/tiingo_ohlcv_sample.json`: Recorded Tiingo API response for 3 tickers, 1 date. Include one with missing `adjClose` for null handling.
+- [ ] `tests/fixtures/tiingo_universe_sample.csv`: Sample supported tickers CSV (10 rows).
+- [ ] `test_sources/test_tiingo.py`: Mock HTTP responses with `responses` library. Test OHLCV fetch, rate limiting (mock 429), per-ticker error handling. Test universe download + filter.
+- [ ] `test_pipeline.py`: Add US integration test. Same pattern as KRX: mocked API, 1 date, 5 tickers, verify Parquet output.
+
+### Milestone check: `python -m getstock run --market us` fetches real Tiingo data for the configured universe, writes Parquet, queryable via DuckDB.
+
+---
+
+## Phase 5: DuckDB Query Layer
+
+- [ ] Implement `query.py`:
+  - `get_ohlcv(market, start_date, end_date, ticker=None, source_id=None) → DataFrame`: Read from `data/ohlcv/{market}/**/*.parquet` with DuckDB. Filter by date range and optionally by ticker/source_id.
+  - `get_universe(market, active_only=True) → DataFrame`: Read instrument metadata.
+  - `get_quarantine_log(market, start_date=None, end_date=None) → DataFrame`: Read quarantine files.
+- [ ] Wire `cli.py` `query` command to `query.py`. Print results to stdout as tabular text.
+- [ ] `test_query.py`: Write sample Parquet files to tmp dir, verify DuckDB queries return correct results. Test glob patterns spanning multiple years.
+
+### Milestone check: `python -m getstock query --market us --ticker AAPL --start 2025-06-01 --end 2026-03-15` returns data from Parquet.
+
+---
+
+## Phase 6: Backfill & Operations Hardening
+
+### Backfill
+
+- [ ] Test `backfill` command end-to-end for KRX: backfill 1 week, verify file structure.
+- [ ] Test `backfill` command end-to-end for US: backfill 1 week for a small watchlist.
+- [ ] Add progress logging to backfill: `Processing date 15/252: 2025-09-15...`
+- [ ] Add `--dry-run` flag to `run` and `backfill`: log what would be fetched without writing.
 
 ### Operations
 
-- [ ] Create example crontab entries in `README.md` for KRX (07:00 UTC weekdays) and US (21:30 UTC weekdays).
-- [ ] Document manual backfill procedure.
-- [ ] Document how to inspect quarantine logs.
-- [ ] Document how to query data via DuckDB (sample SQL in README or a `queries/` directory).
-- [ ] Add `.env.example` with all required environment variables documented.
+- [ ] Add crontab example entries to README (KRX: 07:00 UTC weekdays, US: 21:30 UTC weekdays).
+- [ ] Document manual backfill procedure (how to run, what to expect, timing estimates).
+- [ ] Document quarantine inspection: how to query quarantine logs via DuckDB.
+- [ ] Document data querying: sample DuckDB SQL for common patterns (single ticker history, cross-sectional snapshot, join with metadata).
+
+### Milestone check: Full 1-year backfill runs for KRX. US backfill runs for configured subset. Cron schedule works for 7 consecutive days.
+
+---
+
+## Phase 7: Documentation & Polish
+
+- [ ] Write `README.md`: Overview, setup instructions (venv, pip install, .env), usage examples, cron configuration, data directory layout, DuckDB query examples, architecture summary.
+- [ ] Add `.env.example` with all environment variables documented.
+- [ ] Review all log messages for clarity and consistency.
+- [ ] Review error messages for actionability (tell the user what to do, not just what went wrong).
+- [ ] Verify all public functions have concise docstrings.
 
 ---
 
 ## Deferred / Not in v1
 
-- [ ] Fallback data sources (e.g., Yahoo Finance, FRED for macro data)
+- [ ] Fallback data sources (Yahoo Finance, FRED, etc.)
 - [ ] Self-calculated adjusted prices for KRX (requires verified corporate action history)
 - [ ] Full ticker/name change history tracking (slowly changing dimension)
 - [ ] Backfill beyond 1 year
@@ -237,4 +264,6 @@
 - [ ] Fundamental data (earnings, financial statements)
 - [ ] Automatic quarantine retry mechanism
 - [ ] Async/parallel ingestion for performance optimization
+- [ ] Independent dividend/split datasets for US (currently derived from adjusted prices or omitted)
+- [ ] Automated periodic re-backfill to refresh historical adjusted prices
 - [ ] Pre-built DuckDB views for common backtest queries
